@@ -1,0 +1,763 @@
+# Matrix multiplication from foundations
+
+```elixir
+Mix.install([
+  {:nx, "~> 0.3.0"},
+  {:scidata, "~> 0.1.9"},
+  {:binary, "~> 0.0.5"}
+])
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+:ok
+```
+
+## References
+
+This Livebook is a transformation of a Python Jupyter Notebook from Fast.ai's [From Deep Learning Foundations to Stable Diffusion](https://www.fast.ai/posts/part2-2022.html), Practical Deep Learning for Coders part 2, 2022. Specifically, it mimics https://github.com/fastai/course22p2/blob/master/nbs/01_matmul.ipynb
+
+The purpose of the transformation is to bring the Fast.ai concepts to Elixir focused developers.  The object-oriented Python/PyTorch implementation is transformed into a functional programming implementation using [Nx](https://github.com/elixir-nx/nx) and [Axon](https://github.com/elixir-nx/axon)
+
+<!-- livebook:{"break_markdown":true} -->
+
+---
+
+<!-- livebook:{"break_markdown":true} -->
+
+The *foundations* we'll assume throughout this Elixir version of Fast.ai's course are:
+
+* Elixir
+* Nx, Axon
+* [Livebook](https://livebook.dev/)
+
+## Brief Introduction to Elixir and Numerical Elixir
+
+Elixir's primary numerical datatypes and structures are not optimized for numerical programming. Nx is a library built to bridge that gap.
+
+Elixir Nx is a numerical computing library to smoothly integrate to typed, multidimensional data implemented on other platforms (called tensors). This support extends to the compilers and libraries that support those tensors. Nx has three primary capabilities:
+
+* In Nx, tensors hold typed data in multiple, named dimensions.
+* Numerical definitions, known as defn, support custom code with tensor-aware operators and functions.
+* Automatic differentiation, also known as autograd or autodiff, supports common computational scenarios such as machine learning, simulations, curve fitting, and probabilistic models.
+
+https://hexdocs.pm/nx/intro-to-nx.htm  Note that this url is a really a livebook.  When you click on the Run in Livebook button, it navigates to an intermediate page where you can choose the location of your LiveBook application.  It then opens the page in your LiveBook application.
+
+## Getting the Data
+
+Elixir has the Scidata library that contains small standard datasets, including MNIST.
+
+```elixir
+{train_images, train_labels} = Scidata.MNIST.download()
+{test_images, test_labels} = Scidata.MNIST.download_test()
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{{<<0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, ...>>, {:u, 8}, {10000, 1, 28, 28}},
+ {<<7, 2, 1, 0, 4, 1, 4, 9, 5, 9, 0, 6, 9, 0, 1, 5, 9, 7, 3, 4, 9, 6, 6, 5, 4, 0, 7, 4, 0, 1, 3, 1,
+    3, 4, 7, 2, 7, 1, 2, 1, 1, 7, 4, 2, 3, 5, 1, ...>>, {:u, 8}, {10000}}}
+```
+
+```elixir
+# Let's unpack the images like...
+{train_images_binary, tensor_type, train_shape} = train_images
+{test_images_binary, tensor_type, test_shape} = test_images
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{<<0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+   0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, ...>>, {:u, 8}, {10000, 1, 28, 28}}
+```
+
+```elixir
+# Splitting a long binary sequence into pieces.  The Binary library provides a user friendly API
+<<1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15>> |> Binary.split_at(10)
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{<<1, 2, 3, 4, 5, 6, 7, 8, 9, 10>>, <<11, 12, 13, 14, 15>>}
+```
+
+```elixir
+defmodule ReshapeBinary do
+  @moduledoc """
+    Reshapes a long binary into a standard 2 dimensional list of list.
+  """
+
+  @doc """
+  Transforms a long binary into a list of target lists where each target list is unit_length
+  long sequence of floating point values between 0 and 1.  The value is normallized by
+  dividing the incoming byte, as integer, by the max_value
+
+  Returns list of list.
+
+  ## Examples
+
+      iex> ReshapeBinary.reshape_2d(<<1,2,3,4>>, 2, 255)
+      [[0.003921568627451, 0.007843137254902], [0.0117647058823529, 0.0156862745098039]]
+
+  """
+  def reshape_2d(<<full_binary::binary>>, unit_length, max_value) do
+    {img_binary, remaining} = Binary.split_at(full_binary, unit_length)
+
+    normalized_img =
+      img_binary
+      |> Binary.to_list()
+      |> Enum.map(fn x -> x / max_value end)
+
+    reshape_2d(remaining, [normalized_img], unit_length, max_value)
+  end
+
+  # When the binary is empty, return the list of list
+  # Note: For those new to Elixir, private functions are not documented in ExDoc
+  # Developers can still provide guidance to maintainers through comments
+  defp reshape_2d(<<>>, img_list, _unit_length, _max_value) do
+    img_list
+  end
+
+  # Splits the current binary at unit_length.  For the binary at the head position,
+  # convert the binary's integer values into a list and normalize the value.  Normalization
+  # is by dividing by the maximum value.  Regressively calls itself to process
+  # the long binary into a list of list of normalized floating point numbers. 
+  defp reshape_2d(<<current::binary>>, img_list, unit_length, max_value) do
+    {img_binary, remaining} = Binary.split_at(current, unit_length)
+
+    normalized_img =
+      img_binary
+      |> Binary.to_list()
+      |> Enum.map(fn x -> x / max_value end)
+
+    reshape_2d(remaining, [normalized_img | img_list], unit_length, max_value)
+  end
+end
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{:module, ReshapeBinary, <<70, 79, 82, 49, 0, 0, 11, ...>>, {:reshape_2d, 4}}
+```
+
+For those new to Elixir and LiveBook, Elixir function definitions must be contained within a module.  For Python/Jupyter developers exploring Elixir that are used to creating python functions scattered throughout the notebook, creating a unique module for each function defined is not optimal.  In Elixir/Livebook, it is easier to devote a cell to a set of functions in a module.
+
+Anonymous functions can sometimes be used to define functions interspersed in separated cells.  However, the regression example above probably doesn't work with anonymous functions.  Additionally, we don't believe that numerical functions can be anonymous. [Please create a pull request, if we're incorrect.]
+
+Let's see an example of the ReshapeBinary module.
+
+```elixir
+mnist_list = ReshapeBinary.reshape_2d(test_images_binary, 28 * 28, 255)
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+[
+  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+   0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+   0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ...],
+  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+   0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+   0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ...],
+  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+   0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+   0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ...],
+  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+   0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+   0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ...],
+  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+   0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+   0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ...],
+  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+   0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+   0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ...],
+  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+   0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+   0.0, 0.0, 0.0, 0.0, 0.0, ...],
+  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+   0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+   0.0, 0.0, 0.0, 0.0, ...],
+  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+   0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+   0.0, 0.0, 0.0, ...],
+  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+   0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+   0.0, 0.0, ...],
+  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+   0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+   0.0, ...],
+  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+   0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+   ...],
+  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+   0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ...],
+  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+   0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ...],
+  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+   0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ...],
+  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+   0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ...],
+  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+   0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ...],
+  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+   0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ...],
+  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+   0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ...],
+  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+   0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ...],
+  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+   0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ...],
+  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+   0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ...],
+  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+   0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ...],
+  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+   0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ...],
+  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+   0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ...],
+  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+   0.0, 0.0, 0.0, 0.0, 0.0, ...],
+  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+   0.0, 0.0, 0.0, 0.0, ...],
+  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+   0.0, 0.0, 0.0, ...],
+  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+   0.0, 0.0, ...],
+  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+   0.0, ...],
+  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+   ...],
+  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ...],
+  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ...],
+  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ...],
+  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ...],
+  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ...],
+  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ...],
+  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ...],
+  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ...],
+  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ...],
+  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ...],
+  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ...],
+  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ...],
+  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ...],
+  [0.0, 0.0, 0.0, 0.0, 0.0, ...],
+  [0.0, 0.0, 0.0, 0.0, ...],
+  [0.0, 0.0, 0.0, ...],
+  [0.0, 0.0, ...],
+  [0.0, ...],
+  [...],
+  ...
+]
+```
+
+Hmmm.  A whole lot of zeros.  Did the function really work?  Let's find a non-zero value in the first image
+
+```elixir
+norm_first_img = Enum.at(mnist_list, 0)
+first_non_zero = Enum.find_index(norm_first_img, fn x -> x != 0.0 end)
+{first_non_zero, norm_first_img}
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{73,
+ [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ...]}
+```
+
+```elixir
+Enum.split(norm_first_img, first_non_zero)
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ...],
+ [0.03137254901960784, 0.4588235294117647, 0.996078431372549, 0.8627450980392157,
+  0.34901960784313724, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.050980392156862744, 0.37254901960784315, 0.8313725490196079,
+  0.9921568627450981, 0.9921568627450981, 0.9921568627450981, 0.615686274509804, 0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ...]}
+```
+
+Now we can see that the normalization worked.
+
+## Visualizing Normalized Data
+
+We have an normalized image in memory, how do we check that it really represents an image?
+
+```elixir
+# first let's denormalize the values
+first_img =
+  Enum.map(norm_first_img, fn x ->
+    (x * 255)
+    |> round()
+  end)
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, ...]
+```
+
+```elixir
+Enum.at(first_img, first_non_zero)
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+8
+```
+
+TODO:  Anyone want to create a pull request?
+
+Demonstrate how to visualize normalized data in a 28x28 list of lists.  Should be able to have a display like
+
+plt.imshow(img);
+
+A likely approach would be to use
+
+and then show with Kino.image
+
+probably need to convert the values back to integers.
+
+maybe  def from_binary(binary, options \\ []) when is_binary(binary) do
+
+or maybe def open
+
+## Matrix and tensor
+
+TODO: Anyone want to create a pull request?
+
+Demonstrate loading an Nx tensor from a list.
+
+%Cell
+Nx.tensor([1,2,3])  See: https://hexdocs.pm/nx/intro-to-nx.html
+
+<!-- livebook:{"break_markdown":true} -->
+
+Loading Scidata into Nx Tensors
+
+```elixir
+train_tensors =
+  train_images_binary
+  |> Nx.from_binary(tensor_type)
+  |> Nx.reshape(train_shape)
+  |> Nx.divide(255)
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+#Nx.Tensor<
+  f32[60000][1][28][28]
+  [
+    [
+      [
+        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ...],
+        ...
+      ]
+    ],
+    ...
+  ]
+>
+```
+
+```elixir
+train_tensors.shape
+# Hmmm.  Perhaps there is a bug in the train data of Scidata.MNIST
+# It has conflated the test images into the train???
+
+# Note that we'll need to flatten the 28x28 into 784 in order to train on the data
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{60000, 1, 28, 28}
+```
+
+TODO:  
+Load one 28x28 Tensor into Kino.Image
+
+Similar to:
+
+plt.imshow(imgs[0]);
+
+## Random Numbers
+
+TODO:
+Not sure how much we need the random number section from Fast.ai's notebook.  Once I here the intent, I'll decide what to include here.
+
+## Matrix multiplication
+
+```elixir
+# TODO:
+# Write in Elixir
+# weights = torch.randn(784,10)
+# bias = torch.zeros(10)
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+nil
+```
+
+```elixir
+# m1 = x_valid[:5]  This is taking the first 5
+# m2 = weights
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+nil
+```
+
+```elixir
+# {m1.shape,m2.shape}
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+nil
+```
+
+```elixir
+# ar,ac = m1.shape # n_rows * n_cols
+# br,bc = m2.shape
+# (ar,ac),(br,bc)
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+nil
+```
+
+```elixir
+# t1 = torch.zeros(ar, bc)
+# t1.shape
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+nil
+```
+
+```elixir
+# for i in range(ar):         # 5
+#     for j in range(bc):     # 10
+#         for k in range(ac): # 784
+#             t1[i,j] += m1[i,k] * m2[k,j]
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+nil
+```
+
+```elixir
+# Show the contents of tl
+# t1
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+nil
+```
+
+```elixir
+# t1.shape
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+nil
+```
+
+```elixir
+# Turn the Elixir version of the nested for loops into an anonymous function called matmul
+# anonymous function like
+# adding = fn (x, y) ->  x + y end
+# https://til.hashrocket.com/posts/9jxsfxysey-timing-a-function-in-elixir
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+nil
+```
+
+```elixir
+# Time the function
+# :timer.tc(matmul, [a,b])
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+nil
+```
+
+## Numba
+
+Not sure how useful the Numba section will be to Elixir
+
+## Elementwise ops
+
+The point of this section is to perform a function on each element of the Python tensor.  The Elixir implementation would use the non tensor data loaded above.
+
+## Frobenius norm:
+
+$$\| A \|_F = \left( \sum_{i,j=1}^n | a_{ij} |^2 \right)^{1/2}$$
+
+<!-- livebook:{"break_markdown":true} -->
+
+Hint: you don't normally need to write equations in LaTeX (really KaTeX) yourself, instead, you can click 'edit' in Wikipedia and copy the LaTeX from there (which is what Jeremy did for the above equation). Or on arxiv.org, click "Download: Other formats" in the top right, then "Download source"; rename the downloaded file to end in .tgz if it doesn't already, and you should find the source there, including the equations to copy and paste. This is the source LaTeX that Jeremy pasted to render the equation above:
+
+```
+$$\| A \|_F = \left( \sum_{i,j=1}^n | a_{ij} |^2 \right)^{1/2}$$
+```
+
+In my case, I went to the Fast.ai notebook code, .ipynb file, to copy the KaTeX from Jeremy's code
+
+## Broadcasting
+
+The term **broadcasting** describes how arrays with different shapes are treated during arithmetic operations.  The term broadcasting was first used by Numpy.
+
+From the [Numpy Documentation](https://docs.scipy.org/doc/numpy-1.10.0/user/basics.broadcasting.html):
+
+```
+The term broadcasting describes how numpy treats arrays with 
+different shapes during arithmetic operations. Subject to certain 
+constraints, the smaller array is “broadcast” across the larger 
+array so that they have compatible shapes. Broadcasting provides a 
+means of vectorizing array operations so that looping occurs in C
+instead of Python. It does this without making needless copies of 
+data and usually leads to efficient algorithm implementations.
+```
+
+In addition to the efficiency of broadcasting, it allows developers to write less code, which typically leads to fewer errors.
+
+*This section was adapted from [Chapter 4](http://nbviewer.jupyter.org/github/fastai/numerical-linear-algebra/blob/master/nbs/4.%20Compressed%20Sensing%20of%20CT%20Scans%20with%20Robust%20Regression.ipynb#4.-Compressed-Sensing-of-CT-Scans-with-Robust-Regression) of the fast.ai [Computational Linear Algebra](https://github.com/fastai/numerical-linear-algebra) course.*
+
+In turn, it was copied from the Fast.ai 01_matmul.ipynb code
+
+## Broadcasting with a scalar
+
+```elixir
+a = Nx.tensor([10.0, 6.0, -4.0])
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+#Nx.Tensor<
+  f32[3]
+  [10.0, 6.0, -4.0]
+>
+```
+
+```elixir
+Nx.greater(a, 0)
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+#Nx.Tensor<
+  u8[3]
+  [1, 1, 0]
+>
+```
+
+```elixir
+Nx.add(a, 1)
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+#Nx.Tensor<
+  f32[3]
+  [11.0, 7.0, -3.0]
+>
+```
+
+```elixir
+# The scalar can be in either position
+Nx.add(1, a)
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+#Nx.Tensor<
+  f32[3]
+  [11.0, 7.0, -3.0]
+>
+```
+
+```elixir
+m = Nx.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]])
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+#Nx.Tensor<
+  f32[3][3]
+  [
+    [1.0, 2.0, 3.0],
+    [4.0, 5.0, 6.0],
+    [7.0, 8.0, 9.0]
+  ]
+>
+```
+
+```elixir
+Nx.multiply(m, 2)
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+#Nx.Tensor<
+  f32[3][3]
+  [
+    [2.0, 4.0, 6.0],
+    [8.0, 10.0, 12.0],
+    [14.0, 16.0, 18.0]
+  ]
+>
+```
+
+```elixir
+Nx.multiply(2, m)
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+#Nx.Tensor<
+  f32[3][3]
+  [
+    [2.0, 4.0, 6.0],
+    [8.0, 10.0, 12.0],
+    [14.0, 16.0, 18.0]
+  ]
+>
+```
+
+## Broadcasting a vector to a matrix
+
+Although broadcasting a scalar is an idea that dates back to APL, the more powerful idea of broadcasting across higher rank tensors [comes from](https://mail.python.org/pipermail/matrix-sig/1995-November/000143.html) a little known language called [Yorick](https://software.llnl.gov/yorick-doc/manual/yorick_50.html).
+
+We can also broadcast a vector to a matrix:
+
+```elixir
+c = Nx.tensor([10.0, 20.0, 30.0])
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+#Nx.Tensor<
+  f32[3]
+  [10.0, 20.0, 30.0]
+>
+```
+
+```elixir
+m
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+#Nx.Tensor<
+  f32[3][3]
+  [
+    [1.0, 2.0, 3.0],
+    [4.0, 5.0, 6.0],
+    [7.0, 8.0, 9.0]
+  ]
+>
+```
+
+```elixir
+{m.shape, c.shape}
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{{3, 3}, {3}}
+```
+
+```elixir
+Nx.add(c, m)
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+#Nx.Tensor<
+  f32[3][3]
+  [
+    [11.0, 22.0, 33.0],
+    [14.0, 25.0, 36.0],
+    [17.0, 28.0, 39.0]
+  ]
+>
+```
+
+We don't really copy the rows, but it looks as if we did. In fact, the rows are given a stride of 0.
+
+<!-- livebook:{"break_markdown":true} -->
+
+TODO:  
+Look at the Nx version of the unsqueeze(0) and unsqueeze(1)
+
+## Broadcasting Rules
+
+TODO:
+Figure out how to capture the intent in Elixir
+
+## Matmul with broadcasting
+
+TODO: 
+Figure out how to represent the intent of this section
+
+<!-- livebook:{"break_markdown":true} -->
+
+Probably going to skip the Einstein summation section.  Not sure it is pertinent to Nx
+
+## CUDA
+
+TODO:
+Figure out how to represent the CUDA section
+
+Mostly, Nx just has to define the backend
