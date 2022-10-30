@@ -1,0 +1,138 @@
+# Elixir/Livebook for Python/Jupyter Developers
+
+## Quick Overview
+
+Python/Jupyter focused developers that are casually looking at Elixir and Livebook notebooks will see concepts that kind of look the same but are different.  Knowing the key differences could help ease understanding about key Elixir concepts in the notebook.  The goal of this guide is to help Python focused people look at a Livebook notebook and grasp what is happening in the notebook.
+
+## Installing Livebook
+
+We've had good success with installing Livebook.dev, https://livebook.dev/#install. There are  native applications for Windows and Mac.  On a Linux system, we go to the Github site, https://github.com/livebook-dev/livebook, and install via Escript.  Don't forget to set the shims.  Also, when running on a local Linux server, the firewall ports for Kino and other interactive cells, are different than the livebook server port.  Be sure to pay attention to the environment variable options in the Readme.md
+
+Let's discuss how Livebook/Elixir is a little different from Jupyter/Python
+
+## Function vs Object Oriented
+
+Elixir is a functional language.  State exists outside of a function with values passed into a function.  Most Elixir functions will probably transform the inputs then supply an output back.  You could think of them as procedures that have everything passed in, don't update any object state, and return the result.
+
+However, there are a few situations where state is held after a function call.  In Elixir, we think of these functions as having a side effect.  Common side effects are storing data in a database, file, or operating resources.  The database "write" and file "write" functions result in changing a resource that can later be retrieved.  There are a several other examples of side effect situations.  We'll even see a few examples in Elixir machine learning libraries.
+
+Elixir has modules that hold function definitions and may define a data structure.  Python has class definitions that hold state and function definitions.  Where a variable can have a method invocation in Python, i.e. list_a.sum(), Elixir values must be passed as arguments into a module's function, Enum.sum(list_b)
+
+## Immutable state in Elixir
+
+For Machine Learning notebooks, state is referenced in variable names specific to the notebook.  This is very similar to how variable state is held in a Jupyter notebook.  The variable values are held by the notebook until the Elixir notebook is closed.
+
+One pretty big difference in Elixir is that all state is immutable.  A function can receive state as an argument variable, however, the variable is immutable so it can't be changed.  The function may transform the information, but any transformations must be returned back as a newly created value.  One convenient approach in Elixir is to assign the resulting function call back to the same variable name.  But there are better conventions that we'll see below
+
+<!-- livebook:{"force_markdown":true} -->
+
+```elixir
+list_b = [1,2,3]
+list_b = Enum.map(list_b, fn(value) -> value * value end)
+```
+
+Like Jupyter notebooks, shift-*return key* will execute the current cell.  The other keyboard shortcuts can be found in the keypad-like icon on the left bar.  There is also a mouse approach with the > Execute that appears above the active cell.  Click on the Execute button will also work.  If you've already install Livebook, try executing the following code cell.
+
+```elixir
+list_b = [1, 2, 3]
+list_b = Enum.map(list_b, fn value -> value * value end)
+```
+
+## Chaining function calls
+
+In many object-oriented languages method calls can be chained sequentially, i.e. array_a.square().sum()
+
+Elixir has a special notation for chaining function calls together.
+
+<!-- livebook:{"force_markdown":true} -->
+
+```elixir
+list_b
+  |> Enum.map(fn(value) -> value * value end)
+  |> Enum.sum()
+```
+
+The |>, pipe operator, takes the result of the previous function and passes it as the first argument to the following function call.  Note that the first argument, a list or enumerable, for Enum.map and Enum.sum aren't shown because the pipe operator represents the output from the previous line of code.
+
+```elixir
+list_b
+|> Enum.map(fn value -> value * value end)
+|> Enum.sum()
+```
+
+```elixir
+# All in one line also works
+list_b |> Enum.map(fn value -> value * value end) |> Enum.sum()
+```
+
+## Elixir functions in modules
+
+As long as the code in a Livebook is calling existing functions, variable assignment works pretty much like they do in Python/Jupyter.  However, Python supports the definition of standalone functions in notebooks.
+
+```python
+def chunks(x, sz):
+    for i in range(0, len(x), sz): yield x[i:i+sz]
+```
+
+Alll Elixir function definitions must be inside a module definition
+
+<!-- livebook:{"force_markdown":true} -->
+
+```elixir
+defmodule ModA do
+  def funct_a() do
+  end
+end
+```
+
+<!-- livebook:{"break_markdown":true} -->
+
+Elixir has an anonymous function capability.  In the above Enum function call, the fn(something) -> transform(something) end) is creating an anonymous function, like Python's lambda.  Anonymous functions can be assigned to variable names and called.  Note the .(args) when the named anonymous function is called.
+
+<!-- livebook:{"force_markdown":true} -->
+
+```elixir
+sum_of_squares = fn(value) ->
+  Enum.map(value, fn(v) -> v * v end) 
+  |> Enum.sum() 
+end
+
+sum_of_squares.(list_b)
+```
+
+```elixir
+sum_of_squares = fn value ->
+  Enum.map(value, fn v -> v * v end)
+  |> Enum.sum()
+end
+
+sum_of_squares.(list_b)
+```
+
+## Livebook module version management
+
+One item to note about Livebook, modules are installed with a version.  Rather than a requirements.txt for an entire folder of Jupyter notebooks, the module dependencies are defined within each notebook.  The Livebook convention is to use the first cell to define any module dependencies.  In this notebook, the basic Elixir language capabilities were sufficient so no modules were Mix.installed.  Watch for the contents of the first cell to explore the modules used in notebooks.  The specific modules used helps with repeatability challenges with notebooks.  However, you'll note that the Elixir and Erlang versions are not defined in the notebook.  Neither was the version of Livebook the notebook was run under.  Operating system dependencies, like Cuda, CudaDNN, cmake, make, etc. are not defined in notebooks either.
+
+## Livebook file format
+
+Livebook's file format is a markdown file.  The use of a well defined standard format allows support for understandable Git pull requests against the .livemd file.
+
+## Left sidebar and hints
+
+We've already mentioned the keyboard shortcuts.  Other icons represent the table of Section labels and connected users.  The lock captures secrets that you don't want stored in your Livebook.  Secrets can be things like a database login, etc.  The runtime settings is kind of an advanced setting.  We suggest finding the documentation or blog posts on how to use the settings.  These settings don't have a strong mapping to Jupyter.  Finally, a Big Hint, if you accidently delete a cell, you can retrieve the cell from the bin/trash.
+
+<!-- livebook:{"break_markdown":true} -->
+
+For the active cell, there are some icons above the cell to the right.  The up and down arrow move the active cell up or down in your notebook.  We just noticed, in Livebook 0.7.2, that there is an icon to insert an image into a markdown cell.  We'll need to try it out.
+
+<!-- livebook:{"break_markdown":true} -->
+
+Another big hint: Livebook knows the cells that are stale.  If you go to the bottom of the notebook, or someplace in the middle of notebook, execute the cell and any cells that are out of date with your edits are executed down to your cell.  This is one technique for executing all of the cells in a notebook.  However, it doesn't force the re-executing of all cells.  Only stale cells are run.  If you re-execute the first cell and then execute the last cell, all cells will be executed.
+
+<!-- livebook:{"break_markdown":true} -->
+
+A Livebook notebook opened from a web resource will not be saved locally unless to instruct Livebook to save the notebook.  Click on the floppy disk icon in the lower right and choose someplace you want to store the notebook.
+
+## Try out some Livebook notebooks
+
+This hasn't been a complete guide to Livebook, but hopefully it provides some context for your exploration of Elixir and Livebook.  Have fun!
