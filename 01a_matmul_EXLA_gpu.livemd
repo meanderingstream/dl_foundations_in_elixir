@@ -18,7 +18,28 @@ Mix.install(
 :ok
 ```
 
+## Before running notebook
+
+This notebook has a dependency on EXLA.  You could have direct access to an NVidia GPU, AMD ROCm or a TPU.  According to the documentation, https://github.com/elixir-nx/nx/tree/main/exla#readme EXLA will try to find a precompiled version that matches your system.  If it doesn't find a match. you will need to install CUDA and CuDNN for your system.
+
+The notebook is currently configured for Nvidia GPU via
+
+```
+system_env: %{"XLA_TARGET" => "cuda111"}
+```
+
+Review the configuration documentation for more options. https://hexdocs.pm/exla/EXLA.html#module-configuration
+
+We had to install CUDA and CuDNN but that was several months ago.  Your experience may vary from ours.
+
 ## Experimenting with backend control
+
+In this notebook, we are going to experiment with swapping out backends in the same notebook.  We chose not to set the backend globally throughout the notebook.  At the beginning of the notebook we'll repeat the approach we used in 01a_matmul_using_CPU.  We begin with the Elixir Binary backend.  You'll see that it isn't quick multiplying 10,000 rows of MNIST data by some arbitrary weights.  We'll then repeat the same multiplication using an NVidia 1080Ti GPU.  The 1080 Ti is not the fastest GPU, but it is tremendously faster than a "large" set of data on the BinaryBackend.
+
+* 31649.26 milliseconds using BinaryBackend with a CPU only.
+* 0.14 milliseconds using XLA with a warmed up GPU
+
+*226,000 times faster on an old GPU*
 
 ```elixir
 # Without choosing a backend, Nx defaults to Nx.BinaryBackend
@@ -44,41 +65,43 @@ Nx.default_backend()
 {Nx.BinaryBackend, []}
 ```
 
+We'll pull down the MNIST data again
+
 ```elixir
 {train_images, train_labels} = Scidata.MNIST.download()
-{test_images, test_labels} = Scidata.MNIST.download_test()
 ```
 
 <!-- livebook:{"output":true} -->
 
 ```
 {{<<0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, ...>>, {:u, 8}, {10000, 1, 28, 28}},
- {<<7, 2, 1, 0, 4, 1, 4, 9, 5, 9, 0, 6, 9, 0, 1, 5, 9, 7, 3, 4, 9, 6, 6, 5, 4, 0, 7, 4, 0, 1, 3, 1,
-    3, 4, 7, 2, 7, 1, 2, 1, 1, 7, 4, 2, 3, 5, 1, ...>>, {:u, 8}, {10000}}}
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, ...>>, {:u, 8}, {60000, 1, 28, 28}},
+ {<<5, 0, 4, 1, 9, 2, 1, 3, 1, 4, 3, 5, 3, 6, 1, 7, 2, 8, 6, 9, 4, 0, 9, 1, 1, 2, 4, 3, 2, 7, 3, 8,
+    6, 9, 0, 5, 6, 0, 7, 6, 1, 8, 7, 9, 3, 9, 8, ...>>, {:u, 8}, {60000}}}
 ```
 
 ```elixir
 {train_images_binary, train_tensor_type, train_shape} = train_images
-{test_images_binary, test_tensor_type, test_shape} = test_images
 ```
 
 <!-- livebook:{"output":true} -->
 
 ```
 {<<0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-   0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, ...>>, {:u, 8}, {10000, 1, 28, 28}}
+   0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, ...>>, {:u, 8}, {60000, 1, 28, 28}}
 ```
 
 ```elixir
-{train_tensor_type, test_tensor_type}
+train_tensor_type
 ```
 
 <!-- livebook:{"output":true} -->
 
 ```
-{{:u, 8}, {:u, 8}}
+{:u, 8}
 ```
+
+Convert into Tensors and normalize to between 0 and 1
 
 ```elixir
 train_tensors =
@@ -100,6 +123,8 @@ train_tensors =
 >
 ```
 
+We'll separate the data into 50,000 train images and 10,000 validation images.
+
 ```elixir
 x_train_cpu = train_tensors[0..49_999]
 x_valid_cpu = train_tensors[50_000..59_999]
@@ -111,6 +136,8 @@ x_valid_cpu = train_tensors[50_000..59_999]
 ```
 {{50000, 784}, {10000, 784}}
 ```
+
+Training is more stable when random numbers are initialized with a mean of 0.0 and a variance of 1.0
 
 ```elixir
 mean = 0.0
@@ -124,11 +151,11 @@ weights_cpu = Nx.random_normal({784, 10}, mean, variance, type: {:f, 32})
 #Nx.Tensor<
   f32[784][10]
   [
-    [-1.2300676107406616, -1.1997238397598267, -1.9952067136764526, 1.0617443323135376, -1.4041376113891602, -0.2182314097881317, 1.4686073064804077, 2.1602230072021484, 1.1015342473983765, -0.6608599424362183],
-    [-1.3111447095870972, 2.4684436321258545, -0.3749065399169922, -0.06131727993488312, 0.05180155485868454, 0.42293089628219604, -0.7537996172904968, -0.35125917196273804, 1.0763864517211914, 0.18233363330364227],
-    [-1.611325979232788, -0.666179358959198, -1.4290579557418823, 1.454958200454712, 0.22783735394477844, -0.7801699042320251, 0.2435704618692398, -0.6871567368507385, -0.7277348041534424, 0.10037553310394287],
-    [-0.7115886807441711, -0.5177516937255859, 1.1852874755859375, -0.195032998919487, -0.7827126383781433, 0.240373432636261, -0.11045489460229874, 0.7962868213653564, -0.0027189296670258045, -1.1320666074752808],
-    [-1.185189127922058, 0.6095731854438782, -1.2220104932785034, -0.22155828773975372, -1.3718606233596802, 0.510450005531311, -0.5407333970069885, -1.4425822496414185, -0.7442138195037842, -1.880690336227417],
+    [-0.5412212014198303, -1.5031448602676392, -0.9375351071357727, 0.8842236995697021, 1.2010047435760498, -0.2788948118686676, 0.09495414793491364, -1.530068039894104, -1.0373481512069702, 1.0582575798034668],
+    [1.0582325458526611, 0.623931884765625, -2.1486785411834717, 0.33179396390914917, 0.39910393953323364, 0.36134496331214905, -1.6878384351730347, -1.3250863552093506, 0.9663388729095459, -1.22098708152771],
+    [-1.0654748678207397, 0.3679066598415375, -1.8295735120773315, -0.333093523979187, 1.6659176349639893, 0.5998020768165588, -0.2500625252723694, -1.2196239233016968, 0.1907813549041748, -0.14031249284744263],
+    [-0.8476660847663879, 0.3183368742465973, -0.01679874397814274, -0.33443644642829895, 0.2650495767593384, 0.4326851963996887, -0.673367440700531, -0.07346426695585251, -0.2923451066017151, 1.0891989469528198],
+    [0.7539434432983398, -1.7904051542282104, -0.24815252423286438, -0.42723143100738525, -0.8594269752502441, -0.27156633138656616, 0.01748797297477722, 1.3395498991012573, 1.05559504032135, 0.5666554570198059],
     ...
   ]
 >
@@ -168,102 +195,10 @@ avg_elapsed_time_ms = elapsed_time_micro / 1000 / repeat_times
 <!-- livebook:{"output":true} -->
 
 ```
-"Elixir.Nx.BinaryBackend CPU avg time in 31988.8336 milliseconds, total_time 159944.168 milliseconds"
+"Elixir.Nx.BinaryBackend CPU avg time in 31512.4698 milliseconds, total_time 157562.349 milliseconds"
 ```
 
-```elixir
-Nx.default_backend({EXLA.Backend, client: :host})
-Nx.default_backend()
-```
-
-<!-- livebook:{"output":true} -->
-
-```
-{EXLA.Backend, [client: :host]}
-```
-
-```elixir
-x_valid_exla = Nx.backend_transfer(x_valid_cpu, {EXLA.Backend, client: :host})
-weights_exla = Nx.backend_transfer(weights_cpu, {EXLA.Backend, client: :host})
-```
-
-<!-- livebook:{"output":true} -->
-
-```
-
-15:19:33.536 [info] XLA service 0x7f839811d380 initialized for platform Host (this does not guarantee that XLA will be used). Devices:
-
-15:19:33.539 [info]   StreamExecutor device (0): Host, Default Version
-
-```
-
-<!-- livebook:{"output":true} -->
-
-```
-#Nx.Tensor<
-  f32[784][10]
-  EXLA.Backend<host:0, 0.1877786681.1509556256.239031>
-  [
-    [-1.2300676107406616, -1.1997238397598267, -1.9952067136764526, 1.0617443323135376, -1.4041376113891602, -0.2182314097881317, 1.4686073064804077, 2.1602230072021484, 1.1015342473983765, -0.6608599424362183],
-    [-1.3111447095870972, 2.4684436321258545, -0.3749065399169922, -0.06131727993488312, 0.05180155485868454, 0.42293089628219604, -0.7537996172904968, -0.35125917196273804, 1.0763864517211914, 0.18233363330364227],
-    [-1.611325979232788, -0.666179358959198, -1.4290579557418823, 1.454958200454712, 0.22783735394477844, -0.7801699042320251, 0.2435704618692398, -0.6871567368507385, -0.7277348041534424, 0.10037553310394287],
-    [-0.7115886807441711, -0.5177516937255859, 1.1852874755859375, -0.195032998919487, -0.7827126383781433, 0.240373432636261, -0.11045489460229874, 0.7962868213653564, -0.0027189296670258045, -1.1320666074752808],
-    [-1.185189127922058, 0.6095731854438782, -1.2220104932785034, -0.22155828773975372, -1.3718606233596802, 0.510450005531311, -0.5407333970069885, -1.4425822496414185, -0.7442138195037842, -1.880690336227417],
-    ...
-  ]
->
-```
-
-```elixir
-exla_mult_fn = fn -> Nx.dot(x_valid_exla, weights_exla) end
-```
-
-<!-- livebook:{"output":true} -->
-
-```
-#Function<43.3316493/0 in :erl_eval.expr/6>
-```
-
-```elixir
-repeat_times = 5
-# Warm up one iteration
-{elapsed_time_micro, _} = :timer.tc(repeat, [exla_mult_fn, repeat_times])
-{elapsed_time_micro, _} = :timer.tc(repeat, [exla_mult_fn, repeat_times])
-avg_elapsed_time_ms = elapsed_time_micro / 1000 / repeat_times
-
-{backend, _device} = Nx.default_backend()
-
-"#{backend} CPU avg time in #{avg_elapsed_time_ms} milliseconds, total_time #{elapsed_time_micro / 1000} milliseconds"
-```
-
-<!-- livebook:{"output":true} -->
-
-```
-
-15:19:33.698 [info] successful NUMA node read from SysFS had negative value (-1), but there must be at least one NUMA node, so returning NUMA node zero
-
-15:19:33.698 [info] XLA service 0x7f8398114770 initialized for platform CUDA (this does not guarantee that XLA will be used). Devices:
-
-15:19:33.698 [info]   StreamExecutor device (0): NVIDIA GeForce GTX 1080 Ti, Compute Capability 6.1
-
-15:19:33.698 [info] Using BFC allocator.
-
-15:19:33.698 [info] XLA backend allocating 10414463385 bytes on device 0 for BFCAllocator.
-
-15:19:34.312 [error] Execution of replica 0 failed: INVALID_ARGUMENT: Buffer passed to Execute() as argument 0 to replica 0 is on device cpu:0, but replica is assigned to device gpu:0.
-
-```
-
-```elixir
-# x_valid_cpu = Nx.backend_transfer(x_valid_xla)
-# weights_cpu = Nx.backend_transfer(weights_xla)
-```
-
-<!-- livebook:{"output":true} -->
-
-```
-nil
-```
+Switch to the XLA backend and use the cuda device.  If you have a different device, replace all the :cuda specification with your device.
 
 ```elixir
 Nx.default_backend({EXLA.Backend, device: :cuda})
@@ -276,9 +211,27 @@ Nx.default_backend()
 {EXLA.Backend, [device: :cuda]}
 ```
 
+In the following section, we transfer the target data onto the GPU.
+
 ```elixir
-x_valid_cuda = Nx.backend_transfer(x_valid_exla, {EXLA.Backend, client: :cuda})
-weights_cuda = Nx.backend_transfer(weights_exla, {EXLA.Backend, client: :cuda})
+x_valid_cuda = Nx.backend_transfer(x_valid_cpu, {EXLA.Backend, client: :cuda})
+weights_cuda = Nx.backend_transfer(weights_cpu, {EXLA.Backend, client: :cuda})
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+
+18:55:14.765 [info] successful NUMA node read from SysFS had negative value (-1), but there must be at least one NUMA node, so returning NUMA node zero
+
+18:55:14.767 [info] XLA service 0x7fabac028070 initialized for platform CUDA (this does not guarantee that XLA will be used). Devices:
+
+18:55:14.767 [info]   StreamExecutor device (0): NVIDIA GeForce GTX 1080 Ti, Compute Capability 6.1
+
+18:55:14.767 [info] Using BFC allocator.
+
+18:55:14.767 [info] XLA backend allocating 10414463385 bytes on device 0 for BFCAllocator.
+
 ```
 
 <!-- livebook:{"output":true} -->
@@ -286,13 +239,13 @@ weights_cuda = Nx.backend_transfer(weights_exla, {EXLA.Backend, client: :cuda})
 ```
 #Nx.Tensor<
   f32[784][10]
-  EXLA.Backend<cuda:0, 0.1877786681.1509556256.239048>
+  EXLA.Backend<cuda:0, 0.3135309292.1542848544.244133>
   [
-    [-1.2300676107406616, -1.1997238397598267, -1.9952067136764526, 1.0617443323135376, -1.4041376113891602, -0.2182314097881317, 1.4686073064804077, 2.1602230072021484, 1.1015342473983765, -0.6608599424362183],
-    [-1.3111447095870972, 2.4684436321258545, -0.3749065399169922, -0.06131727993488312, 0.05180155485868454, 0.42293089628219604, -0.7537996172904968, -0.35125917196273804, 1.0763864517211914, 0.18233363330364227],
-    [-1.611325979232788, -0.666179358959198, -1.4290579557418823, 1.454958200454712, 0.22783735394477844, -0.7801699042320251, 0.2435704618692398, -0.6871567368507385, -0.7277348041534424, 0.10037553310394287],
-    [-0.7115886807441711, -0.5177516937255859, 1.1852874755859375, -0.195032998919487, -0.7827126383781433, 0.240373432636261, -0.11045489460229874, 0.7962868213653564, -0.0027189296670258045, -1.1320666074752808],
-    [-1.185189127922058, 0.6095731854438782, -1.2220104932785034, -0.22155828773975372, -1.3718606233596802, 0.510450005531311, -0.5407333970069885, -1.4425822496414185, -0.7442138195037842, -1.880690336227417],
+    [-0.5412212014198303, -1.5031448602676392, -0.9375351071357727, 0.8842236995697021, 1.2010047435760498, -0.2788948118686676, 0.09495414793491364, -1.530068039894104, -1.0373481512069702, 1.0582575798034668],
+    [1.0582325458526611, 0.623931884765625, -2.1486785411834717, 0.33179396390914917, 0.39910393953323364, 0.36134496331214905, -1.6878384351730347, -1.3250863552093506, 0.9663388729095459, -1.22098708152771],
+    [-1.0654748678207397, 0.3679066598415375, -1.8295735120773315, -0.333093523979187, 1.6659176349639893, 0.5998020768165588, -0.2500625252723694, -1.2196239233016968, 0.1907813549041748, -0.14031249284744263],
+    [-0.8476660847663879, 0.3183368742465973, -0.01679874397814274, -0.33443644642829895, 0.2650495767593384, 0.4326851963996887, -0.673367440700531, -0.07346426695585251, -0.2923451066017151, 1.0891989469528198],
+    [0.7539434432983398, -1.7904051542282104, -0.24815252423286438, -0.42723143100738525, -0.8594269752502441, -0.27156633138656616, 0.01748797297477722, 1.3395498991012573, 1.05559504032135, 0.5666554570198059],
     ...
   ]
 >
@@ -316,21 +269,19 @@ repeat_times = 5
 avg_elapsed_time_ms = elapsed_time_micro / 1000 / repeat_times
 
 {backend, [device: device]} = Nx.default_backend()
-# backend
-# # "#{backend} #{device}"
-# IO.inspect(device)
+
 "#{backend} #{device} avg time in #{avg_elapsed_time_ms} milliseconds total_time #{elapsed_time_micro / 1000} milliseconds"
 ```
 
 <!-- livebook:{"output":true} -->
 
 ```
-"Elixir.EXLA.Backend cuda avg time in 0.1462 milliseconds total_time 0.731 milliseconds"
+"Elixir.EXLA.Backend cuda avg time in 0.1402 milliseconds total_time 0.701 milliseconds"
 ```
 
 ```elixir
-x_valid_xla = Nx.backend_transfer(x_valid_cuda, {EXLA.Backend, client: :host})
-weights_xla = Nx.backend_transfer(weights_cuda, {EXLA.Backend, client: :host})
+x_valid_cpu = Nx.backend_transfer(x_valid_cuda, Nx.BinaryBackend)
+weights_cpu = Nx.backend_transfer(weights_cuda, Nx.BinaryBackend)
 ```
 
 <!-- livebook:{"output":true} -->
@@ -338,13 +289,12 @@ weights_xla = Nx.backend_transfer(weights_cuda, {EXLA.Backend, client: :host})
 ```
 #Nx.Tensor<
   f32[784][10]
-  EXLA.Backend<host:0, 0.1877786681.1509556256.239060>
   [
-    [-1.2300676107406616, -1.1997238397598267, -1.9952067136764526, 1.0617443323135376, -1.4041376113891602, -0.2182314097881317, 1.4686073064804077, 2.1602230072021484, 1.1015342473983765, -0.6608599424362183],
-    [-1.3111447095870972, 2.4684436321258545, -0.3749065399169922, -0.06131727993488312, 0.05180155485868454, 0.42293089628219604, -0.7537996172904968, -0.35125917196273804, 1.0763864517211914, 0.18233363330364227],
-    [-1.611325979232788, -0.666179358959198, -1.4290579557418823, 1.454958200454712, 0.22783735394477844, -0.7801699042320251, 0.2435704618692398, -0.6871567368507385, -0.7277348041534424, 0.10037553310394287],
-    [-0.7115886807441711, -0.5177516937255859, 1.1852874755859375, -0.195032998919487, -0.7827126383781433, 0.240373432636261, -0.11045489460229874, 0.7962868213653564, -0.0027189296670258045, -1.1320666074752808],
-    [-1.185189127922058, 0.6095731854438782, -1.2220104932785034, -0.22155828773975372, -1.3718606233596802, 0.510450005531311, -0.5407333970069885, -1.4425822496414185, -0.7442138195037842, -1.880690336227417],
+    [-0.5412212014198303, -1.5031448602676392, -0.9375351071357727, 0.8842236995697021, 1.2010047435760498, -0.2788948118686676, 0.09495414793491364, -1.530068039894104, -1.0373481512069702, 1.0582575798034668],
+    [1.0582325458526611, 0.623931884765625, -2.1486785411834717, 0.33179396390914917, 0.39910393953323364, 0.36134496331214905, -1.6878384351730347, -1.3250863552093506, 0.9663388729095459, -1.22098708152771],
+    [-1.0654748678207397, 0.3679066598415375, -1.8295735120773315, -0.333093523979187, 1.6659176349639893, 0.5998020768165588, -0.2500625252723694, -1.2196239233016968, 0.1907813549041748, -0.14031249284744263],
+    [-0.8476660847663879, 0.3183368742465973, -0.01679874397814274, -0.33443644642829895, 0.2650495767593384, 0.4326851963996887, -0.673367440700531, -0.07346426695585251, -0.2923451066017151, 1.0891989469528198],
+    [0.7539434432983398, -1.7904051542282104, -0.24815252423286438, -0.42723143100738525, -0.8594269752502441, -0.27156633138656616, 0.01748797297477722, 1.3395498991012573, 1.05559504032135, 0.5666554570198059],
     ...
   ]
 >
