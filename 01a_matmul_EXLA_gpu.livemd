@@ -1,0 +1,286 @@
+# Matrix multiplication on GPU - EXLA
+
+```elixir
+Mix.install(
+  [
+    {:nx, "~> 0.4.0"},
+    {:scidata, "~> 0.1.9"},
+    {:axon, "~> 0.3.0"},
+    {:exla, "~> 0.4"}
+  ],
+  system_env: %{"XLA_TARGET" => "cuda111"}
+)
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+:ok
+```
+
+## Experimenting with backend control
+
+```elixir
+# Without choosing a backend, Nx defaults to Nx.BinaryBackend
+Nx.default_backend()
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{Nx.BinaryBackend, []}
+```
+
+```elixir
+# Just in case you rerun the notebook, let's make sure the default backend is BinaryBackend
+# Setting to the Nx default backend
+Nx.default_backend(Nx.BinaryBackend)
+Nx.default_backend()
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{Nx.BinaryBackend, []}
+```
+
+```elixir
+{train_images, train_labels} = Scidata.MNIST.download()
+{test_images, test_labels} = Scidata.MNIST.download_test()
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{{<<0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, ...>>, {:u, 8}, {10000, 1, 28, 28}},
+ {<<7, 2, 1, 0, 4, 1, 4, 9, 5, 9, 0, 6, 9, 0, 1, 5, 9, 7, 3, 4, 9, 6, 6, 5, 4, 0, 7, 4, 0, 1, 3, 1,
+    3, 4, 7, 2, 7, 1, 2, 1, 1, 7, 4, 2, 3, 5, 1, ...>>, {:u, 8}, {10000}}}
+```
+
+```elixir
+{train_images_binary, train_tensor_type, train_shape} = train_images
+{test_images_binary, test_tensor_type, test_shape} = test_images
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{<<0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+   0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, ...>>, {:u, 8}, {10000, 1, 28, 28}}
+```
+
+```elixir
+{train_tensor_type, test_tensor_type}
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{{:u, 8}, {:u, 8}}
+```
+
+```elixir
+train_tensors =
+  train_images_binary
+  |> Nx.from_binary(train_tensor_type)
+  |> Nx.reshape({60000, 28 * 28})
+  |> Nx.divide(255)
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+#Nx.Tensor<
+  f32[60000][784]
+  [
+    [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ...],
+    ...
+  ]
+>
+```
+
+```elixir
+x_train = train_tensors[0..49_999]
+x_valid = train_tensors[50_000..59_999]
+{x_train.shape, x_valid.shape}
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{{50000, 784}, {10000, 784}}
+```
+
+```elixir
+mean = 0.0
+variance = 1.0
+weights = Nx.random_normal({784, 10}, mean, variance, type: {:f, 32})
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+#Nx.Tensor<
+  f32[784][10]
+  [
+    [-1.868837594985962, -1.3299405574798584, 1.0964388847351074, -0.022701969370245934, 0.9204014539718628, -0.6279709339141846, -0.6119310259819031, -2.5152499675750732, 0.3466760814189911, 0.9019446969032288],
+    [-1.9518463611602783, -0.5567031502723694, 0.23419660329818726, -0.5967530608177185, 0.398069828748703, 0.05460115522146225, -0.1584894061088562, -0.6780656576156616, -0.4404866099357605, -0.3982204794883728],
+    [0.388563871383667, 0.2884884178638458, -2.1724796295166016, -0.42840689420700073, 0.18565474450588226, -0.10431160777807236, -0.3283192217350006, 0.550286591053009, 0.022824116051197052, -1.8002437353134155],
+    [-0.9032949209213257, -0.974274754524231, 0.1576901376247406, 1.4216889142990112, -2.5952341556549072, -0.9305671453475952, 0.9752632975578308, -1.1775791645050049, 1.7187891006469727, 0.491897851228714],
+    [-1.644404411315918, 0.44466859102249146, -2.234100818634033, 1.141223430633545, -1.385459303855896, -0.6372795701026917, -1.406225562095642, 0.6583705544471741, 1.8023241758346558, -0.5615820288658142],
+    ...
+  ]
+>
+```
+
+```elixir
+large_nx_mult_fn = fn -> Nx.dot(x_valid, weights) end
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+#Function<43.3316493/0 in :erl_eval.expr/6>
+```
+
+```elixir
+repeat = fn timed_fn, times -> Enum.each(1..times, fn _x -> timed_fn.() end) end
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+#Function<41.3316493/2 in :erl_eval.expr/6>
+```
+
+```elixir
+repeat_times = 5
+{elapsed_time_micro, _} = :timer.tc(repeat, [large_nx_mult_fn, repeat_times])
+avg_elapsed_time_ms = elapsed_time_micro / 1000 / repeat_times
+
+{backend, _device} = Nx.default_backend()
+
+"#{backend} CPU avg time in milliseconds #{avg_elapsed_time_ms} total_time #{elapsed_time_micro / 1000}"
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+"Elixir.EXLA.Backend CPU avg time in milliseconds 32088.6938 total_time 160443.469"
+```
+
+```elixir
+Nx.default_backend(EXLA.Backend)
+Nx.default_backend()
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{EXLA.Backend, []}
+```
+
+```elixir
+repeat_times = 5
+{elapsed_time_micro, _} = :timer.tc(repeat, [large_nx_mult_fn, repeat_times])
+avg_elapsed_time_ms = elapsed_time_micro / 1000 / repeat_times
+
+{backend, _device} = Nx.default_backend()
+
+"#{backend} CPU avg time in milliseconds #{avg_elapsed_time_ms} total_time #{elapsed_time_micro / 1000}"
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+"Elixir.EXLA.Backend CPU avg time in milliseconds 32099.1846 total_time 160495.923"
+```
+
+```elixir
+Nx.default_backend({EXLA.Backend, device: :cuda})
+Nx.default_backend()
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{EXLA.Backend, [device: :cuda]}
+```
+
+```elixir
+x_valid = Nx.backend_transfer(x_valid, {EXLA.Backend, client: :cuda})
+weights = Nx.backend_transfer(weights, {EXLA.Backend, client: :cuda})
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+
+12:42:32.388 [info] successful NUMA node read from SysFS had negative value (-1), but there must be at least one NUMA node, so returning NUMA node zero
+
+12:42:32.391 [info] XLA service 0x7ffa3c067b90 initialized for platform CUDA (this does not guarantee that XLA will be used). Devices:
+
+12:42:32.391 [info]   StreamExecutor device (0): NVIDIA GeForce GTX 1080 Ti, Compute Capability 6.1
+
+12:42:32.391 [info] Using BFC allocator.
+
+12:42:32.391 [info] XLA backend allocating 10414463385 bytes on device 0 for BFCAllocator.
+
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+#Nx.Tensor<
+  f32[784][10]
+  EXLA.Backend<cuda:0, 0.3636657784.3898212378.16792>
+  [
+    [-1.868837594985962, -1.3299405574798584, 1.0964388847351074, -0.022701969370245934, 0.9204014539718628, -0.6279709339141846, -0.6119310259819031, -2.5152499675750732, 0.3466760814189911, 0.9019446969032288],
+    [-1.9518463611602783, -0.5567031502723694, 0.23419660329818726, -0.5967530608177185, 0.398069828748703, 0.05460115522146225, -0.1584894061088562, -0.6780656576156616, -0.4404866099357605, -0.3982204794883728],
+    [0.388563871383667, 0.2884884178638458, -2.1724796295166016, -0.42840689420700073, 0.18565474450588226, -0.10431160777807236, -0.3283192217350006, 0.550286591053009, 0.022824116051197052, -1.8002437353134155],
+    [-0.9032949209213257, -0.974274754524231, 0.1576901376247406, 1.4216889142990112, -2.5952341556549072, -0.9305671453475952, 0.9752632975578308, -1.1775791645050049, 1.7187891006469727, 0.491897851228714],
+    [-1.644404411315918, 0.44466859102249146, -2.234100818634033, 1.141223430633545, -1.385459303855896, -0.6372795701026917, -1.406225562095642, 0.6583705544471741, 1.8023241758346558, -0.5615820288658142],
+    ...
+  ]
+>
+```
+
+```elixir
+repeat_times = 5
+{elapsed_time_micro, _} = :timer.tc(repeat, [large_nx_mult_fn, repeat_times])
+avg_elapsed_time_ms = elapsed_time_micro / 1000 / repeat_times
+
+{backend, [device: device]} = Nx.default_backend()
+# backend
+# # "#{backend} #{device}"
+# IO.inspect(device)
+"#{backend} #{device} avg time in milliseconds #{avg_elapsed_time_ms} total_time #{elapsed_time_micro / 1000}"
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+"Elixir.EXLA.Backend cuda avg time in milliseconds 32281.680200000003 total_time 161408.401"
+```
+
+```elixir
+x_valid = Nx.backend_transfer(x_valid)
+weights = Nx.backend_transfer(weights)
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+#Nx.Tensor<
+  f32[784][10]
+  [
+    [-1.868837594985962, -1.3299405574798584, 1.0964388847351074, -0.022701969370245934, 0.9204014539718628, -0.6279709339141846, -0.6119310259819031, -2.5152499675750732, 0.3466760814189911, 0.9019446969032288],
+    [-1.9518463611602783, -0.5567031502723694, 0.23419660329818726, -0.5967530608177185, 0.398069828748703, 0.05460115522146225, -0.1584894061088562, -0.6780656576156616, -0.4404866099357605, -0.3982204794883728],
+    [0.388563871383667, 0.2884884178638458, -2.1724796295166016, -0.42840689420700073, 0.18565474450588226, -0.10431160777807236, -0.3283192217350006, 0.550286591053009, 0.022824116051197052, -1.8002437353134155],
+    [-0.9032949209213257, -0.974274754524231, 0.1576901376247406, 1.4216889142990112, -2.5952341556549072, -0.9305671453475952, 0.9752632975578308, -1.1775791645050049, 1.7187891006469727, 0.491897851228714],
+    [-1.644404411315918, 0.44466859102249146, -2.234100818634033, 1.141223430633545, -1.385459303855896, -0.6372795701026917, -1.406225562095642, 0.6583705544471741, 1.8023241758346558, -0.5615820288658142],
+    ...
+  ]
+>
+```
