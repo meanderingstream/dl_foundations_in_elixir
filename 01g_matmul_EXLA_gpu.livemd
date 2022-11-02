@@ -1,0 +1,320 @@
+# Matrix multiplication on GPU - XLA
+
+```elixir
+Mix.install(
+  [
+    {:nx, "~> 0.4.0"},
+    {:scidata, "~> 0.1.9"},
+    {:axon, "~> 0.3.0"},
+    {:exla, "~> 0.4"}
+  ],
+  system_env: %{"XLA_TARGET" => "cuda111"}
+)
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+:ok
+```
+
+## Before running notebook
+
+This notebook has a dependency on EXLA.  XLA support systems with direct access to an NVidia GPU, AMD ROCm or a Google TPU.  According to the documentation, https://github.com/elixir-nx/nx/tree/main/exla#readme EXLA will try to find a precompiled version that matches your system.  If it doesn't find a match. you will need to install CUDA and CuDNN for your system.
+
+The notebook is currently configured for Nvidia GPU via
+
+```
+system_env: %{"XLA_TARGET" => "cuda111"}
+```
+
+Review the configuration documentation for more options. https://hexdocs.pm/exla/EXLA.html#module-configuration
+
+We had to install CUDA and CuDNN but that was several months ago.  Your experience may vary from ours.
+
+## Context
+
+This Livebook is a transformation of a Python Jupyter Notebook from Fast.ai's From Deep Learning Foundations to Stable Diffusion, Practical Deep Learning for Coders part 2, 2022. Specifically, it mimics the CUDA portion of https://github.com/fastai/course22p2/blob/master/nbs/01_matmul.ipynb
+
+The purpose of the transformation is to bring the Fast.ai concepts to Elixir focused developers. The object-oriented Python/PyTorch implementation is transformed into a functional programming implementation using Nx and Axon
+
+## Experimenting with backend control
+
+In this notebook, we are going to experiment with swapping out backends in the same notebook. One of the strengths of Elixir's numerical processing approach is the concept of a backend. The same Nx code can run on several different backends. This allows Nx to adapt to changes in numerical libaries and technology. Currently, Nx has support for Tensorflow's XLA and PyTorch's TorchScript. Theoretically, backends for SOC type devices should be possible.
+
+We chose not to set the backend globally throughout the notebook.  At the beginning of the notebook we'll repeat the approach we used in 01a_matmul_using_CPU.  We begin with the Elixir Binary backend.  You'll see that it isn't quick multiplying 10,000 rows of MNIST data by some arbitrary weights.  We'll then repeat the same multiplication using an NVidia 1080Ti GPU.  The 1080 Ti is not the fastest GPU, but it is tremendously faster than a "large" set of data on the BinaryBackend.
+
+* 31649.26 milliseconds using BinaryBackend with a CPU only.
+* 0.14 milliseconds using XLA with a warmed up GPU
+
+*226,000 times faster on an old GPU*
+
+```elixir
+# Without choosing a backend, Nx defaults to Nx.BinaryBackend
+Nx.default_backend()
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{Nx.BinaryBackend, []}
+```
+
+```elixir
+# Just in case you rerun the notebook, let's make sure the default backend is BinaryBackend
+# Setting to the Nx default backend
+Nx.default_backend(Nx.BinaryBackend)
+Nx.default_backend()
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{Nx.BinaryBackend, []}
+```
+
+We'll pull down the MNIST data
+
+```elixir
+{train_images, train_labels} = Scidata.MNIST.download()
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{{<<0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, ...>>, {:u, 8}, {60000, 1, 28, 28}},
+ {<<5, 0, 4, 1, 9, 2, 1, 3, 1, 4, 3, 5, 3, 6, 1, 7, 2, 8, 6, 9, 4, 0, 9, 1, 1, 2, 4, 3, 2, 7, 3, 8,
+    6, 9, 0, 5, 6, 0, 7, 6, 1, 8, 7, 9, 3, 9, 8, ...>>, {:u, 8}, {60000}}}
+```
+
+```elixir
+{train_images_binary, train_tensor_type, train_shape} = train_images
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{<<0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+   0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, ...>>, {:u, 8}, {60000, 1, 28, 28}}
+```
+
+```elixir
+train_tensor_type
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{:u, 8}
+```
+
+Convert into Tensors and normalize to between 0 and 1
+
+```elixir
+train_tensors =
+  train_images_binary
+  |> Nx.from_binary(train_tensor_type)
+  |> Nx.reshape({60000, 28 * 28})
+  |> Nx.divide(255)
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+#Nx.Tensor<
+  f32[60000][784]
+  [
+    [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ...],
+    ...
+  ]
+>
+```
+
+We'll separate the data into 50,000 train images and 10,000 validation images.
+
+```elixir
+x_train_cpu = train_tensors[0..49_999]
+x_valid_cpu = train_tensors[50_000..59_999]
+{x_train_cpu.shape, x_valid_cpu.shape}
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{{50000, 784}, {10000, 784}}
+```
+
+Training is more stable when random numbers are initialized with a mean of 0.0 and a variance of 1.0
+
+```elixir
+mean = 0.0
+variance = 1.0
+weights_cpu = Nx.random_normal({784, 10}, mean, variance, type: {:f, 32})
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+#Nx.Tensor<
+  f32[784][10]
+  [
+    [-1.086855411529541, -0.5075337290763855, 0.7384397983551025, -0.6559776663780212, 3.2370996475219727, 0.28995978832244873, 1.321189522743225, 0.8996213674545288, -0.5768947005271912, 0.6064193844795227],
+    [-0.2762833535671234, -0.2724544405937195, -0.2070193588733673, 1.0002022981643677, 0.6568933725357056, -1.3428876399993896, 0.1809699833393097, -0.3042425215244293, 1.6070313453674316, 0.20574049651622772],
+    [0.542879581451416, -0.49000734090805054, 1.149538278579712, 2.0917320251464844, 1.345374584197998, 2.1565239429473877, -1.0284807682037354, 0.9887690544128418, 0.382597416639328, -0.5817388892173767],
+    [0.28052785992622375, 1.1811832189559937, -0.3018780052661896, -0.684103786945343, 0.9120818972587585, 0.5988516211509705, 1.6603827476501465, 1.0356638431549072, 0.8483000993728638, 2.5311660766601562],
+    [-1.2488210201263428, -0.2942318916320801, 0.24606744945049286, 1.5914311408996582, 0.6577766537666321, 0.48272040486335754, -0.01604907214641571, 0.029986852779984474, 1.1461899280548096, 1.1196788549423218],
+    ...
+  ]
+>
+```
+
+In order to simplify timing the performance of the Nx.dot/2 function, we'll use an 0 parameter anonymous function.  Invoking the anonymous function will always use the two parameters, x_valid_cpu and weights_cpu.
+
+```elixir
+large_nx_mult_fn = fn -> Nx.dot(x_valid_cpu, weights_cpu) end
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+#Function<43.3316493/0 in :erl_eval.expr/6>
+```
+
+The following anonymous function takes function and the number of times to make the call to the function.
+
+```elixir
+repeat = fn timed_fn, times -> Enum.each(1..times, fn _x -> timed_fn.() end) end
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+#Function<41.3316493/2 in :erl_eval.expr/6>
+```
+
+Timing the average duration of the dot multiply function to run.  The cell will output the average and total elapsed time
+
+```elixir
+repeat_times = 5
+{elapsed_time_micro, _} = :timer.tc(repeat, [large_nx_mult_fn, repeat_times])
+avg_elapsed_time_ms = elapsed_time_micro / 1000 / repeat_times
+
+{backend, _device} = Nx.default_backend()
+
+"#{backend} CPU avg time in #{avg_elapsed_time_ms} milliseconds, total_time #{elapsed_time_micro / 1000} milliseconds"
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+"Elixir.Nx.BinaryBackend CPU avg time in 31555.8108 milliseconds, total_time 157779.054 milliseconds"
+```
+
+We'll switch to the XLA backend and use the cuda device.  If you have a different device, replace all the :cuda specifications with your device.
+
+```elixir
+Nx.default_backend({EXLA.Backend, device: :cuda})
+Nx.default_backend()
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{EXLA.Backend, [device: :cuda]}
+```
+
+In the following cell, we transfer the target data onto the GPU.
+
+```elixir
+x_valid_cuda = Nx.backend_transfer(x_valid_cpu, {EXLA.Backend, client: :cuda})
+weights_cuda = Nx.backend_transfer(weights_cpu, {EXLA.Backend, client: :cuda})
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+
+17:35:37.605 [info] successful NUMA node read from SysFS had negative value (-1), but there must be at least one NUMA node, so returning NUMA node zero
+
+17:35:37.607 [info] XLA service 0x7f3cb4028070 initialized for platform CUDA (this does not guarantee that XLA will be used). Devices:
+
+17:35:37.607 [info]   StreamExecutor device (0): NVIDIA GeForce GTX 1080 Ti, Compute Capability 6.1
+
+17:35:37.607 [info] Using BFC allocator.
+
+17:35:37.607 [info] XLA backend allocating 10414463385 bytes on device 0 for BFCAllocator.
+
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+#Nx.Tensor<
+  f32[784][10]
+  EXLA.Backend<cuda:0, 0.196916145.3364225050.3766>
+  [
+    [-1.086855411529541, -0.5075337290763855, 0.7384397983551025, -0.6559776663780212, 3.2370996475219727, 0.28995978832244873, 1.321189522743225, 0.8996213674545288, -0.5768947005271912, 0.6064193844795227],
+    [-0.2762833535671234, -0.2724544405937195, -0.2070193588733673, 1.0002022981643677, 0.6568933725357056, -1.3428876399993896, 0.1809699833393097, -0.3042425215244293, 1.6070313453674316, 0.20574049651622772],
+    [0.542879581451416, -0.49000734090805054, 1.149538278579712, 2.0917320251464844, 1.345374584197998, 2.1565239429473877, -1.0284807682037354, 0.9887690544128418, 0.382597416639328, -0.5817388892173767],
+    [0.28052785992622375, 1.1811832189559937, -0.3018780052661896, -0.684103786945343, 0.9120818972587585, 0.5988516211509705, 1.6603827476501465, 1.0356638431549072, 0.8483000993728638, 2.5311660766601562],
+    [-1.2488210201263428, -0.2942318916320801, 0.24606744945049286, 1.5914311408996582, 0.6577766537666321, 0.48272040486335754, -0.01604907214641571, 0.029986852779984474, 1.1461899280548096, 1.1196788549423218],
+    ...
+  ]
+>
+```
+
+An anonymous function that calls Nx.dot/2 with data on the GPU
+
+```elixir
+exla_gpu_mult_fn = fn -> Nx.dot(x_valid_cuda, weights_cuda) end
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+#Function<43.3316493/0 in :erl_eval.expr/6>
+```
+
+We'll warm up the GPU by looping through 5 function calls and then timing the next 5 
+function calls.
+
+```elixir
+repeat_times = 5
+# Warm up one epoch
+{elapsed_time_micro, _} = :timer.tc(repeat, [exla_gpu_mult_fn, repeat_times])
+# The real timing starts here
+{elapsed_time_micro, _} = :timer.tc(repeat, [exla_gpu_mult_fn, repeat_times])
+avg_elapsed_time_ms = elapsed_time_micro / 1000 / repeat_times
+
+{backend, [device: device]} = Nx.default_backend()
+
+"#{backend} #{device} avg time in #{avg_elapsed_time_ms} milliseconds total_time #{elapsed_time_micro / 1000} milliseconds"
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+"Elixir.EXLA.Backend cuda avg time in 0.1762 milliseconds total_time 0.881 milliseconds"
+```
+
+```elixir
+x_valid_cpu = Nx.backend_transfer(x_valid_cuda, Nx.BinaryBackend)
+weights_cpu = Nx.backend_transfer(weights_cuda, Nx.BinaryBackend)
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+#Nx.Tensor<
+  f32[784][10]
+  [
+    [-1.086855411529541, -0.5075337290763855, 0.7384397983551025, -0.6559776663780212, 3.2370996475219727, 0.28995978832244873, 1.321189522743225, 0.8996213674545288, -0.5768947005271912, 0.6064193844795227],
+    [-0.2762833535671234, -0.2724544405937195, -0.2070193588733673, 1.0002022981643677, 0.6568933725357056, -1.3428876399993896, 0.1809699833393097, -0.3042425215244293, 1.6070313453674316, 0.20574049651622772],
+    [0.542879581451416, -0.49000734090805054, 1.149538278579712, 2.0917320251464844, 1.345374584197998, 2.1565239429473877, -1.0284807682037354, 0.9887690544128418, 0.382597416639328, -0.5817388892173767],
+    [0.28052785992622375, 1.1811832189559937, -0.3018780052661896, -0.684103786945343, 0.9120818972587585, 0.5988516211509705, 1.6603827476501465, 1.0356638431549072, 0.8483000993728638, 2.5311660766601562],
+    [-1.2488210201263428, -0.2942318916320801, 0.24606744945049286, 1.5914311408996582, 0.6577766537666321, 0.48272040486335754, -0.01604907214641571, 0.029986852779984474, 1.1461899280548096, 1.1196788549423218],
+    ...
+  ]
+>
+```

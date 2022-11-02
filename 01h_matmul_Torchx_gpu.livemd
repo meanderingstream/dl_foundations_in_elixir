@@ -1,0 +1,378 @@
+# Matrix multiplication on GPU - TorchScript
+
+```elixir
+Mix.install(
+  [
+    {:nx, "~> 0.4.0"},
+    {:scidata, "~> 0.1.9"},
+    {:torchx, "~> 0.3"}
+  ],
+  system_env: %{"LIBTORCH_TARGET" => "cu116"}
+)
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+:ok
+```
+
+## Before running notebook
+
+This notebook has a dependency on TorchScript. Torchx can use your CPU or GPU.  If you have direct access to an NVidia GPU, the notebook has a section on running matrix multiplication on a GPU. If you only have a CPU, you can comment out the last GPU section and just run on your CPU.  CPU is still pretty fast for this simple notebook.
+
+According to the documentation, https://github.com/elixir-nx/nx/tree/main/torchx#readme Torchx will need to compile the TorchScript binding.  Before you run the above cell, you will need make/nmake, cmake (3.12+) and a C++ compiler.  The Windows binding to TorchScript is also supported and more information can be found at the Torchx readme. At this time, the MacOS binding doesn't support access to a GPU.
+
+**Running the first cell downloads and compiles the binding to TorchScript. The download of TorchScript took about 9 minutes and compilation took about 1 minute on our system.**  In the future, it is likely that the downloaded TorchScript file will be cached locally, however, right now each notebook that uses torchx will download the file.
+
+The notebook is currently set up for an Nvidia GPU on Linux.
+
+```
+system_env: %{"LIBTORCH_TARGET" => "cu111"}
+```
+
+Feel free to read the Torchx documentation and modify to fit your needs.
+
+## Context
+
+The notebook is a transformation of a Python Jupyter Notebook from Fast.ai's [From Deep Learning Foundations to Stable Diffusion](https://www.fast.ai/posts/part2-2022.html), Practical Deep Learning for Coders part 2, 2022. Specifically, it mimics the CUDA portion of https://github.com/fastai/course22p2/blob/master/nbs/01_matmul.ipynb
+
+The purpose of the transformation is to bring the Fast.ai concepts to Elixir focused developers.  The object-oriented Python/PyTorch implementation is transformed into a functional programming implementation using [Nx](https://github.com/elixir-nx/nx) and [Axon](https://github.com/elixir-nx/axon)
+
+## Experimenting with backend control
+
+In this notebook, we are going to experiment with swapping out backends in the same notebook. One of the strengths of Elixir's numerical processing approach is the concept of a backend.  The same Nx code can run on several different backends.  This allows Nx to adapt to changes in numerical libaries and technology.  Currently, Nx has support for Tensorflow's XLA and PyTorch's TorchScript.  Theoretically, backends for SOC type devices should be possible.
+
+We chose not to set the backend globally in this notebook. At the beginning of the notebook, we'll repeat the approach we used in 01a_matmul_using_CPU. We begin with the Elixir Binary backend. You'll see that it isn't quick multiplying 10,000 rows of MNIST data by some arbitrary weights.
+
+We'll then repeat the same multiplication using TorchScript on the CPU.  Followed again by TorchScript using an NVidia 1080Ti GPU. The 1080 Ti is not the fastest GPU, but it is tremendously faster than a "large" set of data on the BinaryBackend but only a little faster than just the CPU
+
+* About 32 seconds using BinaryBackend with only a CPU.
+* 1.8 milliseconds using TorchScript with only a CPU
+
+17,778 times faster than Binary backend
+
+* 70 microseconds using TorchScript with a warmed up, but old, GPU
+
+111 times faster on the GPU vs the CPU
+
+```elixir
+# Without choosing a backend, Nx defaults to Nx.BinaryBackend
+Nx.default_backend()
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{Nx.BinaryBackend, []}
+```
+
+```elixir
+# Just in case you rerun the notebook, let's make sure the default backend is BinaryBackend
+# Setting to the Nx default backend
+Nx.default_backend(Nx.BinaryBackend)
+Nx.default_backend()
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{Nx.BinaryBackend, []}
+```
+
+We'll pull down the MNIST data
+
+```elixir
+{train_images, train_labels} = Scidata.MNIST.download()
+{test_images, test_labels} = Scidata.MNIST.download_test()
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{{<<0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, ...>>, {:u, 8}, {10000, 1, 28, 28}},
+ {<<7, 2, 1, 0, 4, 1, 4, 9, 5, 9, 0, 6, 9, 0, 1, 5, 9, 7, 3, 4, 9, 6, 6, 5, 4, 0, 7, 4, 0, 1, 3, 1,
+    3, 4, 7, 2, 7, 1, 2, 1, 1, 7, 4, 2, 3, 5, 1, ...>>, {:u, 8}, {10000}}}
+```
+
+```elixir
+{train_images_binary, train_tensor_type, train_shape} = train_images
+{test_images_binary, test_tensor_type, test_shape} = test_images
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{<<0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+   0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, ...>>, {:u, 8}, {10000, 1, 28, 28}}
+```
+
+```elixir
+{train_tensor_type, test_tensor_type}
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{{:u, 8}, {:u, 8}}
+```
+
+Convert into Tensors and normalize to between 0 and 1
+
+```elixir
+train_tensors =
+  train_images_binary
+  |> Nx.from_binary(train_tensor_type)
+  |> Nx.reshape({60000, 28 * 28})
+  |> Nx.divide(255)
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+#Nx.Tensor<
+  f32[60000][784]
+  [
+    [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ...],
+    ...
+  ]
+>
+```
+
+We'll separate the data into 50,000 train images and 10,000 validation images.
+
+```elixir
+x_train = train_tensors[0..49_999]
+x_valid = train_tensors[50_000..59_999]
+{x_train.shape, x_valid.shape}
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{{50000, 784}, {10000, 784}}
+```
+
+Training is more stable when random numbers are initialized with a mean of 0.0 and a variance of 1.0
+
+```elixir
+mean = 0.0
+variance = 1.0
+weights = Nx.random_normal({784, 10}, mean, variance, type: {:f, 32})
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+#Nx.Tensor<
+  f32[784][10]
+  [
+    [0.042952682822942734, -0.7191802859306335, -0.9604451060295105, 0.4411265552043915, -0.9040254354476929, -0.15050290524959564, -0.5932722091674805, -0.2187509983778, -0.2861626148223877, -0.4869517683982849],
+    [-0.5552104115486145, -0.05408240109682083, -0.7666929364204407, 0.315731406211853, -1.3370205163955688, 1.249748945236206, -1.3642921447753906, -0.9347469806671143, -0.8221617937088013, 1.7534701824188232],
+    [0.33702409267425537, 1.086232304573059, -1.6756598949432373, 0.9868239760398865, 0.4801158308982849, 1.6563321352005005, 0.08707369118928909, -0.8592584729194641, 1.2005187273025513, -0.7245656251907349],
+    [1.3047608137130737, -2.056178569793701, -0.43657511472702026, -0.43665340542793274, -1.470029354095459, 1.6980197429656982, 0.447671502828598, 0.8667044043540955, -1.115644931793213, -1.8108052015304565],
+    [-1.5540833473205566, -0.5569180250167847, -0.4097130000591278, 0.9533838033676147, -0.046061135828495026, -0.11665370315313339, -0.14677223563194275, -0.399471640586853, 0.8467879891395569, 0.4475526809692383],
+    ...
+  ]
+>
+```
+
+In order to simplify timing the performance of the Nx.dot/2 function, we'll use an 0 parameter anonymous function. Invoking the anonymous function will always use the two parameters, x_valid_cpu and weights_cpu.
+
+```elixir
+large_nx_mult_fn = fn -> Nx.dot(x_valid, weights) end
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+#Function<43.3316493/0 in :erl_eval.expr/6>
+```
+
+The following anonymous function take a function and the number of times to make the call to the function.
+
+```elixir
+repeat = fn timed_fn, times -> Enum.each(1..times, fn _x -> timed_fn.() end) end
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+#Function<41.3316493/2 in :erl_eval.expr/6>
+```
+
+Timing the average duration of the dot multiply function to run. The cell will output the average and total elapsed time
+
+```elixir
+repeat_times = 5
+{elapsed_time_micro, _} = :timer.tc(repeat, [large_nx_mult_fn, repeat_times])
+avg_elapsed_time_ms = elapsed_time_micro / 1000 / repeat_times
+
+{backend, _device} = Nx.default_backend()
+
+"#{backend} CPU avg time in #{avg_elapsed_time_ms} milliseconds  total_time #{elapsed_time_micro / 1000} milliseconds"
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+"Elixir.Nx.BinaryBackend CPU avg time in 31334.9244 milliseconds  total_time 156674.622 milliseconds"
+```
+
+We'll switch to the TorchScript backend but we'll stick with using the CPU.
+
+```elixir
+Nx.default_backend({Torchx.Backend, device: :cpu})
+Nx.default_backend()
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{Torchx.Backend, [device: :cpu]}
+```
+
+In the following cell, we transfer the target data from BinaryBackend to Torchx cpu backend.
+
+```elixir
+x_valid_torchx_cpu = Nx.backend_transfer(x_valid, {Torchx.Backend, device: :cpu})
+weights_torchx_cpu = Nx.backend_transfer(weights, {Torchx.Backend, device: :cpu})
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+#Nx.Tensor<
+  f32[784][10]
+  Torchx.Backend(cpu)
+  [
+    [0.042952682822942734, -0.7191802859306335, -0.9604451060295105, 0.4411265552043915, -0.9040254354476929, -0.15050290524959564, -0.5932722091674805, -0.2187509983778, -0.2861626148223877, -0.4869517683982849],
+    [-0.5552104115486145, -0.05408240109682083, -0.7666929364204407, 0.315731406211853, -1.3370205163955688, 1.249748945236206, -1.3642921447753906, -0.9347469806671143, -0.8221617937088013, 1.7534701824188232],
+    [0.33702409267425537, 1.086232304573059, -1.6756598949432373, 0.9868239760398865, 0.4801158308982849, 1.6563321352005005, 0.08707369118928909, -0.8592584729194641, 1.2005187273025513, -0.7245656251907349],
+    [1.3047608137130737, -2.056178569793701, -0.43657511472702026, -0.43665340542793274, -1.470029354095459, 1.6980197429656982, 0.447671502828598, 0.8667044043540955, -1.115644931793213, -1.8108052015304565],
+    [-1.5540833473205566, -0.5569180250167847, -0.4097130000591278, 0.9533838033676147, -0.046061135828495026, -0.11665370315313339, -0.14677223563194275, -0.399471640586853, 0.8467879891395569, 0.4475526809692383],
+    ...
+  ]
+>
+```
+
+An anonymous function that calls Nx.dot/2 with data on the Torchx cpu backend.
+
+```elixir
+torchx_cpu_mult_fn = fn -> Nx.dot(x_valid_torchx_cpu, weights_torchx_cpu) end
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+#Function<43.3316493/0 in :erl_eval.expr/6>
+```
+
+We'll time using Torchx on the CPU.  Notice the significant performance improvement over BinaryBackend while still using just the CPU.
+
+```elixir
+repeat_times = 5
+{elapsed_time_micro, _} = :timer.tc(repeat, [torchx_cpu_mult_fn, repeat_times])
+avg_elapsed_time_ms = elapsed_time_micro / 1000 / repeat_times
+
+{backend, [device: device]} = Nx.default_backend()
+
+"#{backend} #{device} avg time in milliseconds #{avg_elapsed_time_ms} total_time #{elapsed_time_micro / 1000}"
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+"Elixir.Torchx.Backend cpu avg time in milliseconds 1.5224 total_time 7.612"
+```
+
+We'll switch to using the cuda device. If you have a different device, replace all the :cuda specifications with your device.
+
+```elixir
+Nx.default_backend({Torchx.Backend, device: :cuda})
+Nx.default_backend()
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{Torchx.Backend, [device: :cuda]}
+```
+
+In the following cell, we transfer the target data onto the GPU.
+
+```elixir
+x_valid_cuda = Nx.backend_transfer(x_valid, {Torchx.Backend, client: :cuda})
+weights_cuda = Nx.backend_transfer(weights, {Torchx.Backend, client: :cuda})
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+#Nx.Tensor<
+  f32[784][10]
+  Torchx.Backend(cuda)
+  [
+    [0.042952682822942734, -0.7191802859306335, -0.9604451060295105, 0.4411265552043915, -0.9040254354476929, -0.15050290524959564, -0.5932722091674805, -0.2187509983778, -0.2861626148223877, -0.4869517683982849],
+    [-0.5552104115486145, -0.05408240109682083, -0.7666929364204407, 0.315731406211853, -1.3370205163955688, 1.249748945236206, -1.3642921447753906, -0.9347469806671143, -0.8221617937088013, 1.7534701824188232],
+    [0.33702409267425537, 1.086232304573059, -1.6756598949432373, 0.9868239760398865, 0.4801158308982849, 1.6563321352005005, 0.08707369118928909, -0.8592584729194641, 1.2005187273025513, -0.7245656251907349],
+    [1.3047608137130737, -2.056178569793701, -0.43657511472702026, -0.43665340542793274, -1.470029354095459, 1.6980197429656982, 0.447671502828598, 0.8667044043540955, -1.115644931793213, -1.8108052015304565],
+    [-1.5540833473205566, -0.5569180250167847, -0.4097130000591278, 0.9533838033676147, -0.046061135828495026, -0.11665370315313339, -0.14677223563194275, -0.399471640586853, 0.8467879891395569, 0.4475526809692383],
+    ...
+  ]
+>
+```
+
+An anonymous function that calls Nx.dot/2 with data on the GPU
+
+```elixir
+torchx_gpu_mult_fn = fn -> Nx.dot(x_valid_cuda, weights_cuda) end
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+#Function<43.3316493/0 in :erl_eval.expr/6>
+```
+
+We'll warm up the GPU by looping through 5 function calls and then timing the next 5 function calls.
+
+```elixir
+repeat_times = 5
+# Warmup
+{elapsed_time_micro, _} = :timer.tc(repeat, [torchx_gpu_mult_fn, repeat_times])
+{elapsed_time_micro, _} = :timer.tc(repeat, [torchx_gpu_mult_fn, repeat_times])
+avg_elapsed_time_ms = elapsed_time_micro / 1000 / repeat_times
+
+{backend, [device: device]} = Nx.default_backend()
+
+"#{backend} #{device} avg time in milliseconds #{avg_elapsed_time_ms} total_time #{elapsed_time_micro / 1000}"
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+"Elixir.Torchx.Backend cuda avg time in milliseconds 0.0692 total_time 0.346"
+```
+
+```elixir
+x_valid = Nx.backend_transfer(x_valid_cuda, Nx.BinaryBackend)
+weights = Nx.backend_transfer(weights_cuda, Nx.BinaryBackend)
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+#Nx.Tensor<
+  f32[784][10]
+  [
+    [0.042952682822942734, -0.7191802859306335, -0.9604451060295105, 0.4411265552043915, -0.9040254354476929, -0.15050290524959564, -0.5932722091674805, -0.2187509983778, -0.2861626148223877, -0.4869517683982849],
+    [-0.5552104115486145, -0.05408240109682083, -0.7666929364204407, 0.315731406211853, -1.3370205163955688, 1.249748945236206, -1.3642921447753906, -0.9347469806671143, -0.8221617937088013, 1.7534701824188232],
+    [0.33702409267425537, 1.086232304573059, -1.6756598949432373, 0.9868239760398865, 0.4801158308982849, 1.6563321352005005, 0.08707369118928909, -0.8592584729194641, 1.2005187273025513, -0.7245656251907349],
+    [1.3047608137130737, -2.056178569793701, -0.43657511472702026, -0.43665340542793274, -1.470029354095459, 1.6980197429656982, 0.447671502828598, 0.8667044043540955, -1.115644931793213, -1.8108052015304565],
+    [-1.5540833473205566, -0.5569180250167847, -0.4097130000591278, 0.9533838033676147, -0.046061135828495026, -0.11665370315313339, -0.14677223563194275, -0.399471640586853, 0.8467879891395569, 0.4475526809692383],
+    ...
+  ]
+>
+```
