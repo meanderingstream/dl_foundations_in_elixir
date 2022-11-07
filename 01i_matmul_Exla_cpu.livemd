@@ -79,7 +79,7 @@ Generated scidata app
 
 ## Before running notebook
 
-This notebook has a dependency on EXLA.  XLA support systems with direct access to an NVidia GPU, AMD ROCm or a Google TPU.  According to the documentation, https://github.com/elixir-nx/nx/tree/main/exla#readme EXLA will try to find a precompiled version that matches your system.  If it doesn't find a match. you will need to install CUDA and CuDNN for your system.
+This notebook has a dependency on EXLA.  XLA supports systems with direct access to an NVidia GPU, AMD ROCm or a Google TPU.  According to the documentation, https://github.com/elixir-nx/nx/tree/main/exla#readme EXLA will try to find a precompiled version that matches your system.  If it doesn't find a match. you will need to install CUDA and CuDNN for your system.
 
 The notebook is currently configured for Nvidia GPU via
 
